@@ -1,9 +1,13 @@
 import streamlit as st
 import pandas as pd
+import re
 import io
 import zipfile
-import re
 
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
 
 st.set_page_config(
     page_title="Renomeador de PDFs",
@@ -12,18 +16,92 @@ st.set_page_config(
 )
 
 
+# ============================================================
+# FUNÇÕES
+# ============================================================
+
+def normalizar_valor(valor):
+    """
+    Converte qualquer valor para uma representação numérica
+    simples.
+
+    Exemplos:
+    72699       -> 72699
+    72699.0     -> 72699
+    "72699"     -> 72699
+    " 72699 "   -> 72699
+    "OP 72699"  -> 72699
+    """
+
+    if pd.isna(valor):
+        return ""
+
+    texto = str(valor).strip()
+
+    # Se vier como 72699.0
+    texto = re.sub(r"\.0+$", "", texto)
+
+    # Pega somente os números
+    numeros = re.sub(r"\D", "", texto)
+
+    return numeros
+
+
+def extrair_op_do_nome(nome_arquivo):
+    """
+    Pega a primeira sequência de números do nome do PDF.
+
+    Exemplo:
+
+    72699-instituto-qualisa-de-gestao-ltda-000075571.pdf
+
+    retorna:
+
+    72699
+    """
+
+    nome_sem_extensao = nome_arquivo.rsplit(".", 1)[0]
+
+    encontrado = re.match(
+        r"^\s*(\d+)",
+        nome_sem_extensao
+    )
+
+    if encontrado:
+        return encontrado.group(1)
+
+    return ""
+
+
+def criar_nome_arquivo(item, nome_original):
+    """
+    Cria o novo nome do PDF.
+    """
+
+    item = str(item).strip()
+
+    # Evita Item 11.0
+    item = re.sub(r"\.0+$", "", item)
+
+    return f"Item {item} - {nome_original}"
+
+
+# ============================================================
+# TÍTULO
+# ============================================================
+
 st.title("📄 Renomeador de PDFs")
 
 st.write(
-    "O sistema identifica a Ordem de Pagamento pelo nome do PDF "
-    "e acrescenta o Item correspondente do Excel."
+    "O sistema identifica a Ordem de Pagamento no início "
+    "do nome do PDF e busca o Item correspondente no Excel."
 )
 
 st.divider()
 
 
 # ============================================================
-# 1. EXCEL
+# EXCEL
 # ============================================================
 
 st.header("1️⃣ Enviar extrato bancário")
@@ -41,37 +119,83 @@ if arquivo_excel is not None:
 
     try:
 
-        df = pd.read_excel(arquivo_excel)
-
-        st.success(
-            f"✅ Excel carregado: {arquivo_excel.name}"
+        # Lê o Excel como texto para evitar problemas
+        # de conversão automática de números
+        df = pd.read_excel(
+            arquivo_excel,
+            dtype=str
         )
 
-        st.write(
-            f"**{len(df)} registros encontrados.**"
-        )
+        # Remove espaços dos nomes das colunas
+        df.columns = [
+            str(coluna).strip()
+            for coluna in df.columns
+        ]
 
         # Verificar colunas necessárias
+        coluna_op = "Ordem de Pagamento"
+        coluna_item = "Item"
 
-        colunas_necessarias = [
-            "Ordem de Pagamento",
-            "Item"
-        ]
-
-        colunas_faltantes = [
-            coluna
-            for coluna in colunas_necessarias
-            if coluna not in df.columns
-        ]
-
-        if colunas_faltantes:
+        if coluna_op not in df.columns:
 
             st.error(
-                "❌ Não encontrei no Excel: "
-                + ", ".join(colunas_faltantes)
+                "❌ A coluna 'Ordem de Pagamento' não foi encontrada."
+            )
+
+            st.write("Colunas encontradas no Excel:")
+
+            st.write(
+                list(df.columns)
             )
 
             df = None
+
+        elif coluna_item not in df.columns:
+
+            st.error(
+                "❌ A coluna 'Item' não foi encontrada."
+            )
+
+            st.write("Colunas encontradas no Excel:")
+
+            st.write(
+                list(df.columns)
+            )
+
+            df = None
+
+        else:
+
+            # Criar coluna auxiliar normalizada
+            df["OP_NORMALIZADA"] = (
+                df[coluna_op]
+                .apply(normalizar_valor)
+            )
+
+            st.success(
+                f"✅ Excel carregado: {arquivo_excel.name}"
+            )
+
+            st.write(
+                f"**{len(df)} registros encontrados.**"
+            )
+
+            # Mostra somente as colunas importantes
+            st.subheader(
+                "📊 Informações utilizadas"
+            )
+
+            visualizacao = df[
+                [
+                    coluna_op,
+                    coluna_item
+                ]
+            ].copy()
+
+            st.dataframe(
+                visualizacao,
+                use_container_width=True
+            )
 
     except Exception as erro:
 
@@ -83,7 +207,7 @@ if arquivo_excel is not None:
 
 
 # ============================================================
-# 2. PDFS
+# PDFS
 # ============================================================
 
 if df is not None:
@@ -105,78 +229,73 @@ if df is not None:
             f"✅ {len(arquivos_pdf)} PDF(s) selecionado(s)"
         )
 
-
         st.divider()
 
-        st.header("3️⃣ Processar")
+        st.header("3️⃣ Processar documentos")
 
 
         if st.button(
             "🚀 Renomear PDFs",
-            type="primary"
+            type="primary",
+            use_container_width=True
         ):
 
             resultados = []
 
-
-            # ------------------------------------------------
-            # Preparar coluna de OP para pesquisa
-            # ------------------------------------------------
-
-            df_busca = df.copy()
-
-            df_busca["OP_BUSCA"] = (
-                df_busca["Ordem de Pagamento"]
-                .astype(str)
-                .str.strip()
-                .str.replace(r"\.0$", "", regex=True)
-            )
+            arquivos_para_zip = []
 
 
-            # ------------------------------------------------
-            # Processar cada PDF
-            # ------------------------------------------------
+            # =================================================
+            # PROCESSAR CADA PDF
+            # =================================================
 
             for arquivo_pdf in arquivos_pdf:
 
                 nome_original = arquivo_pdf.name
 
+                # ---------------------------------------------
+                # Extrair OP do início do nome
+                # ---------------------------------------------
 
-                # ============================================
-                # PEGAR OP DO NOME DO ARQUIVO
-                # ============================================
+                numero_op = extrair_op_do_nome(
+                    nome_original
+                )
 
-                # Exemplo:
-                #
-                # 72749 - JFKAS LTDA.pdf
-                #
-                # resultado:
-                #
-                # 72749
+                # ---------------------------------------------
+                # Verificar OP
+                # ---------------------------------------------
 
-                parte_nome = nome_original.split(" - ", 1)[0].strip()
+                if not numero_op:
 
-                numero_op = parte_nome
+                    resultados.append({
+                        "Arquivo original": nome_original,
+                        "OP identificada": "",
+                        "Item": "",
+                        "Novo nome": "",
+                        "Status": "❌ Não foi possível identificar a OP"
+                    })
+
+                    continue
 
 
-                # ============================================
-                # PROCURAR OP NO EXCEL
-                # ============================================
+                # ---------------------------------------------
+                # Procurar OP no Excel
+                # ---------------------------------------------
 
-                correspondencia = df_busca[
-                    df_busca["OP_BUSCA"] == numero_op
+                correspondencia = df[
+                    df["OP_NORMALIZADA"] == numero_op
                 ]
 
 
-                # ============================================
-                # OP NÃO ENCONTRADA
-                # ============================================
+                # ---------------------------------------------
+                # OP não encontrada
+                # ---------------------------------------------
 
                 if correspondencia.empty:
 
                     resultados.append({
-                        "PDF original": nome_original,
-                        "OP": numero_op,
+                        "Arquivo original": nome_original,
+                        "OP identificada": numero_op,
                         "Item": "",
                         "Novo nome": "",
                         "Status": "⚠️ OP não encontrada no Excel"
@@ -185,37 +304,63 @@ if df is not None:
                     continue
 
 
-                # ============================================
-                # PEGAR ITEM
-                # ============================================
+                # ---------------------------------------------
+                # OP encontrada
+                # ---------------------------------------------
 
-                item = correspondencia.iloc[0]["Item"]
+                # Primeiro registro correspondente
+                linha = correspondencia.iloc[0]
 
-                # Converter para texto
+                item = str(
+                    linha["Item"]
+                ).strip()
 
-                item = str(item).strip()
 
-                # Evitar que apareça "1.0"
+                # ---------------------------------------------
+                # Verificar Item
+                # ---------------------------------------------
 
-                item = re.sub(
-                    r"\.0$",
-                    "",
-                    item
+                if (
+                    item == ""
+                    or item.lower() == "nan"
+                ):
+
+                    resultados.append({
+                        "Arquivo original": nome_original,
+                        "OP identificada": numero_op,
+                        "Item": "",
+                        "Novo nome": "",
+                        "Status": "⚠️ OP encontrada, mas Item está vazio"
+                    })
+
+                    continue
+
+
+                # ---------------------------------------------
+                # Criar novo nome
+                # ---------------------------------------------
+
+                novo_nome = criar_nome_arquivo(
+                    item,
+                    nome_original
                 )
 
 
-                # ============================================
-                # NOVO NOME
-                # ============================================
+                # ---------------------------------------------
+                # Guardar para ZIP
+                # ---------------------------------------------
 
-                novo_nome = (
-                    f"Item {item} - {nome_original}"
+                arquivos_para_zip.append(
+                    (
+                        novo_nome,
+                        arquivo_pdf.getvalue()
+                    )
                 )
 
 
                 resultados.append({
-                    "PDF original": nome_original,
-                    "OP": numero_op,
+                    "Arquivo original": nome_original,
+                    "OP identificada": numero_op,
                     "Item": item,
                     "Novo nome": novo_nome,
                     "Status": "✅ Encontrado"
@@ -223,64 +368,78 @@ if df is not None:
 
 
             # =================================================
-            # EXIBIR RESULTADOS
+            # RESULTADOS
             # =================================================
-
-            df_resultados = pd.DataFrame(resultados)
-
 
             st.divider()
 
-            st.header("4️⃣ Resultado")
+            st.header("4️⃣ Resultado do processamento")
+
+
+            df_resultados = pd.DataFrame(
+                resultados
+            )
 
 
             st.dataframe(
                 df_resultados,
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True
             )
 
+
+            # =================================================
+            # RESUMO
+            # =================================================
+
+            total = len(resultados)
 
             encontrados = sum(
-                df_resultados["Status"] == "✅ Encontrado"
+                resultado["Status"] == "✅ Encontrado"
+                for resultado in resultados
             )
 
-            problemas = len(df_resultados) - encontrados
+            problemas = total - encontrados
 
 
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
 
 
             with col1:
 
-                st.success(
-                    f"✅ {encontrados} PDF(s) prontos"
+                st.metric(
+                    "PDFs processados",
+                    total
                 )
 
 
             with col2:
 
-                if problemas > 0:
+                st.metric(
+                    "Encontrados",
+                    encontrados
+                )
 
-                    st.warning(
-                        f"⚠️ {problemas} PDF(s) com problema"
-                    )
 
-                else:
+            with col3:
 
-                    st.success(
-                        "🎉 Todos os PDFs foram encontrados!"
-                    )
+                st.metric(
+                    "Com problema",
+                    problemas
+                )
 
 
             # =================================================
-            # GERAR ZIP
+            # ZIP
             # =================================================
 
-            if encontrados > 0:
+            if arquivos_para_zip:
 
                 st.divider()
 
-                st.header("5️⃣ Baixar arquivos")
+                st.header(
+                    "5️⃣ Baixar PDFs renomeados"
+                )
 
 
                 zip_buffer = io.BytesIO()
@@ -292,34 +451,12 @@ if df is not None:
                     zipfile.ZIP_DEFLATED
                 ) as zip_file:
 
+                    for novo_nome, conteudo in arquivos_para_zip:
 
-                    for resultado in resultados:
-
-                        if resultado["Status"] != "✅ Encontrado":
-                            continue
-
-
-                        nome_original = resultado["PDF original"]
-
-                        novo_nome = resultado["Novo nome"]
-
-
-                        arquivo_original = next(
-                            (
-                                arquivo
-                                for arquivo in arquivos_pdf
-                                if arquivo.name == nome_original
-                            ),
-                            None
+                        zip_file.writestr(
+                            novo_nome,
+                            conteudo
                         )
-
-
-                        if arquivo_original:
-
-                            zip_file.writestr(
-                                novo_nome,
-                                arquivo_original.getvalue()
-                            )
 
 
                 zip_buffer.seek(0)
@@ -329,5 +466,30 @@ if df is not None:
                     label="📦 Baixar PDFs renomeados",
                     data=zip_buffer,
                     file_name="PDFs_renomeados.zip",
-                    mime="application/zip"
+                    mime="application/zip",
+                    use_container_width=True
+                )
+
+
+            # =================================================
+            # MENSAGEM FINAL
+            # =================================================
+
+            if encontrados == total:
+
+                st.success(
+                    "🎉 Todos os PDFs foram processados com sucesso!"
+                )
+
+            elif encontrados > 0:
+
+                st.warning(
+                    f"⚠️ {encontrados} PDF(s) foram processados "
+                    f"e {problemas} precisam de verificação."
+                )
+
+            else:
+
+                st.error(
+                    "❌ Nenhum PDF foi relacionado ao Excel."
                 )
