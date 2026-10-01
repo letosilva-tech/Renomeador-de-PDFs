@@ -1,1356 +1,1464 @@
 import streamlit as st
-import pandas as pd
+import os
 import re
-import io
+import unicodedata
+import tempfile
+import shutil
+import gc
 import zipfile
-
-from pypdf import PdfReader, PdfWriter
-
+from io import BytesIO
 
 # ============================================================
+
 # CONFIGURAÇÃO
+
 # ============================================================
 
 st.set_page_config(
-    page_title="Renomeador de PDFs",
-    page_icon="📄",
-    layout="wide"
+page_title="Separador de Comprovantes",
+page_icon="📄",
+layout="wide"
 )
 
-
-# ============================================================
-# CONFIGURAÇÕES DO SISTEMA
 # ============================================================
 
-LIMITE_MB = 10
-LIMITE_BYTES = LIMITE_MB * 1024 * 1024
-
+# CONSTANTES
 
 # ============================================================
-# FUNÇÕES
+
+# Usamos 9,5 MB para deixar margem para o ZIP não ultrapassar
+
+# 10 MB devido aos metadados internos do arquivo ZIP.
+
+LIMITE_MB = 9.5
+
+LIMITE_BYTES = int(
+LIMITE_MB * 1024 * 1024
+)
+
 # ============================================================
 
-def normalizar_valor(valor):
-    """
-    Converte qualquer valor para uma representação numérica simples.
+# TÍTULO
 
-    Exemplos:
+# ============================================================
 
-    72699       -> 72699
-    72699.0     -> 72699
-    "72699"     -> 72699
-    " 72699 "   -> 72699
-    "OP 72699"  -> 72699
-    """
+st.title(
+"📄 Separador de Comprovantes"
+)
 
-    if pd.isna(valor):
-        return ""
+st.write(
+"""
+Envie um PDF contendo vários documentos.
 
-    texto = str(valor).strip()
+```
+O sistema irá identificar os comprovantes e separar:
 
-    # Remove .0 no final
-    texto = re.sub(r"\.0+$", "", texto)
+🔵 **COMPROVANTE PIX**
 
-    # Mantém somente números
-    numeros = re.sub(r"\D", "", texto)
+🟢 **COMPROVANTE DE TRANSFERENCIA**
 
-    return numeros
+🟣 **COMPROVANTE DE TRANSACAO BANCARIA**
 
+As páginas restantes serão colocadas separadamente.
+"""
+```
 
-def extrair_op_do_nome(nome_arquivo):
-    """
-    Pega a primeira sequência de números do nome do PDF.
+)
 
-    Exemplo:
+st.info(
+"""
+📦 Os comprovantes não serão gerados um por um.
 
-    72699-instituto-qualisa-de-gestao-ltda.pdf
+```
+O sistema irá juntar vários comprovantes em arquivos PDF
+maiores e depois colocar esses PDFs em ZIPs de até
+aproximadamente 9,5 MB.
+"""
+```
 
-    retorna:
+)
 
-    72699
-    """
+# ============================================================
 
-    nome_sem_extensao = nome_arquivo.rsplit(".", 1)[0]
+# NORMALIZA TEXTO
 
-    encontrado = re.match(
-        r"^\s*(\d+)",
-        nome_sem_extensao
+# ============================================================
+
+def normalizar_texto(texto):
+
+```
+if not texto:
+    return ""
+
+# Remove acentos
+texto = unicodedata.normalize(
+    "NFKD",
+    texto
+)
+
+texto = "".join(
+    caractere
+    for caractere in texto
+    if not unicodedata.combining(
+        caractere
+    )
+)
+
+# Maiúsculas
+texto = texto.upper()
+
+# Substitui caracteres especiais por espaço
+texto = re.sub(
+    r"[^A-Z0-9]+",
+    " ",
+    texto
+)
+
+# Remove espaços duplicados
+texto = re.sub(
+    r"\s+",
+    " ",
+    texto
+)
+
+return texto.strip()
+```
+
+# ============================================================
+
+# IDENTIFICA COMPROVANTE
+
+# ============================================================
+
+def identificar_comprovante(texto):
+
+```
+texto = normalizar_texto(
+    texto
+)
+
+if not texto:
+    return None
+
+# ========================================================
+# COMPROVANTE PIX
+# ========================================================
+
+# Forma exata:
+# COMPROVANTE PIX
+
+if re.search(
+    r"\bCOMPROVANTE\s+PIX\b",
+    texto
+):
+    return "PIX"
+
+# COMPROVANTE DE PIX
+
+if re.search(
+    r"\bCOMPROVANTE\s+DE\s+PIX\b",
+    texto
+):
+    return "PIX"
+
+# COMPROVANTE DE PAGAMENTO PIX
+
+if re.search(
+    r"\bCOMPROVANTE\s+DE\s+PAGAMENTO\s+PIX\b",
+    texto
+):
+    return "PIX"
+
+# PAGAMENTO PIX
+
+if re.search(
+    r"\bPAGAMENTO\s+PIX\b",
+    texto
+):
+    return "PIX"
+
+# PIX + COMPROVANTE em qualquer posição
+#
+# Isso ajuda nos casos em que o banco apresenta:
+#
+# PIX
+# ...
+# COMPROVANTE
+
+if (
+    re.search(
+        r"\bPIX\b",
+        texto
+    )
+    and
+    re.search(
+        r"\bCOMPROVANTE\b",
+        texto
+    )
+):
+    return "PIX"
+
+# ========================================================
+# COMPROVANTE DE TRANSFERENCIA
+# ========================================================
+
+if re.search(
+    r"\bCOMPROVANTE\s+DE\s+TRANSFERENCIA\b",
+    texto
+):
+    return "TRANSFERENCIA"
+
+if re.search(
+    r"\bCOMPROVANTE\s+TRANSFERENCIA\b",
+    texto
+):
+    return "TRANSFERENCIA"
+
+# ========================================================
+# COMPROVANTE DE TRANSACAO BANCARIA
+# ========================================================
+
+if re.search(
+    r"\bCOMPROVANTE\s+DE\s+TRANSACAO\s+BANCARIA\b",
+    texto
+):
+    return "TRANSACAO_BANCARIA"
+
+if re.search(
+    r"\bCOMPROVANTE\s+TRANSACAO\s+BANCARIA\b",
+    texto
+):
+    return "TRANSACAO_BANCARIA"
+
+# ========================================================
+# OUTRO COMPROVANTE
+# ========================================================
+
+if re.search(
+    r"\bCOMPROVANTE\b",
+    texto
+):
+    return "OUTRO_COMPROVANTE"
+
+return None
+```
+
+# ============================================================
+
+# FORMATA TAMANHO
+
+# ============================================================
+
+def formatar_tamanho(tamanho):
+
+```
+if tamanho < 1024:
+
+    return (
+        f"{tamanho} B"
     )
 
-    if encontrado:
-        return encontrado.group(1)
+if tamanho < 1024 * 1024:
 
-    return ""
+    return (
+        f"{tamanho / 1024:.2f} KB"
+    )
 
+return (
+    f"{tamanho / (1024 * 1024):.2f} MB"
+)
+```
 
-def extrair_op_do_texto(texto):
-    """
-    Procura uma Ordem de Pagamento dentro do texto da página.
+# ============================================================
 
-    Aceita formatos como:
+# CRIA PDF A PARTIR DE PÁGINAS
 
-    OP 72699
-    OP: 72699
-    Ordem de Pagamento: 72699
-    Ordem de Pagamento 72699
+# ============================================================
 
-    Também procura padrões próximos a 'OP'.
-    """
-
-    if not texto:
-        return ""
-
-    # Normaliza espaços
-    texto = re.sub(r"\s+", " ", texto)
-
-    padroes = [
-
-        # Ordem de Pagamento: 72699
-        r"ordem\s+de\s+pagamento\s*[:\-]?\s*(\d+)",
-
-        # OP: 72699
-        r"\bOP\s*[:\-]?\s*(\d+)",
-
-        # O.P.: 72699
-        r"\bO\.?\s*P\.?\s*[:\-]?\s*(\d+)",
-    ]
-
-    for padrao in padroes:
-
-        encontrado = re.search(
-            padrao,
-            texto,
-            flags=re.IGNORECASE
-        )
-
-        if encontrado:
-
-            return normalizar_valor(
-                encontrado.group(1)
-            )
-
-    return ""
-
-
-def criar_nome_arquivo(item, nome_original):
-    """
-    Cria o novo nome do PDF.
-    """
-
-    item = str(item).strip()
-
-    # Evita Item 11.0
-    item = re.sub(r"\.0+$", "", item)
-
-    return f"Item {item} - {nome_original}"
-
-
-def tamanho_mb(conteudo):
-    """
-    Retorna tamanho em MB.
-    """
-
-    return len(conteudo) / (1024 * 1024)
-
-
-def gerar_pdf_paginas(reader, paginas):
-    """
-    Cria um novo PDF contendo as páginas informadas.
-
-    paginas = lista de índices das páginas.
-    """
-
-    writer = PdfWriter()
-
-    for indice in paginas:
-
-        writer.add_page(
-            reader.pages[indice]
-        )
-
-    buffer = io.BytesIO()
-
-    writer.write(buffer)
-
-    return buffer.getvalue()
-
-
-def dividir_documento_por_tamanho(
-    reader,
-    paginas,
-    limite_bytes=LIMITE_BYTES
+def criar_pdf(
+reader,
+paginas
 ):
-    """
-    Divide um documento SOMENTE se ele ultrapassar o limite.
 
-    A divisão tenta agrupar o maior número possível de páginas
-    sem ultrapassar 10 MB.
+```
+writer = PdfWriter()
 
-    Retorna uma lista de blocos.
-    """
+for numero_pagina in paginas:
 
-    blocos = []
+    writer.add_page(
+        reader.pages[
+            numero_pagina
+        ]
+    )
 
-    bloco_atual = []
+buffer = BytesIO()
 
-    for pagina in paginas:
+writer.write(
+    buffer
+)
 
-        teste_paginas = bloco_atual + [pagina]
+resultado = buffer.getvalue()
 
-        conteudo_teste = gerar_pdf_paginas(
+del writer
+
+buffer.close()
+
+gc.collect()
+
+return resultado
+```
+
+# ============================================================
+
+# AGRUPA PÁGINAS EM PDFs
+
+#
+
+# IMPORTANTE:
+
+#
+
+# Aqui NÃO criamos um PDF para cada comprovante.
+
+#
+
+# As páginas são acumuladas até o PDF chegar perto de 9,5 MB.
+
+# ============================================================
+
+def agrupar_paginas_em_pdfs(
+reader,
+paginas,
+progress_bar,
+progresso_inicio,
+progresso_fim
+):
+
+```
+arquivos_pdf = []
+
+grupo_atual = []
+
+total_paginas = len(
+    paginas
+)
+
+if total_paginas == 0:
+
+    return arquivos_pdf
+
+for indice, numero_pagina in enumerate(
+    paginas
+):
+
+    # ====================================================
+    # PRIMEIRA PÁGINA
+    # ====================================================
+
+    if not grupo_atual:
+
+        grupo_atual = [
+            numero_pagina
+        ]
+
+        continue
+
+    # ====================================================
+    # TESTA NOVA PÁGINA
+    # ====================================================
+
+    grupo_teste = (
+        grupo_atual
+        +
+        [numero_pagina]
+    )
+
+    pdf_teste = criar_pdf(
+        reader,
+        grupo_teste
+    )
+
+    tamanho_teste = len(
+        pdf_teste
+    )
+
+    # ====================================================
+    # AINDA CABE
+    # ====================================================
+
+    if tamanho_teste <= LIMITE_BYTES:
+
+        grupo_atual = (
+            grupo_teste
+        )
+
+    # ====================================================
+    # PASSOU DO LIMITE
+    # ====================================================
+
+    else:
+
+        # ------------------------------------------------
+        # Salva grupo anterior
+        # ------------------------------------------------
+
+        pdf_final = criar_pdf(
             reader,
-            teste_paginas
+            grupo_atual
         )
 
-        tamanho_teste = len(
-            conteudo_teste
+        arquivos_pdf.append(
+            pdf_final
         )
 
-        # Ainda cabe no limite
-        if tamanho_teste <= limite_bytes:
+        # ------------------------------------------------
+        # Começa novo grupo
+        # ------------------------------------------------
 
-            bloco_atual.append(
-                pagina
-            )
+        grupo_atual = [
+            numero_pagina
+        ]
 
-        else:
+    # Libera teste
+    del pdf_teste
 
-            # Se já existe algo no bloco,
-            # salva o bloco atual
-            if bloco_atual:
+    gc.collect()
 
-                conteudo_bloco = gerar_pdf_paginas(
-                    reader,
-                    bloco_atual
-                )
+    # ====================================================
+    # PROGRESSO
+    # ====================================================
 
-                blocos.append(
-                    (
-                        bloco_atual.copy(),
-                        conteudo_bloco
-                    )
-                )
-
-                bloco_atual = [
-                    pagina
-                ]
-
-            else:
-
-                # Página individual maior que 10 MB
-                conteudo_pagina = gerar_pdf_paginas(
-                    reader,
-                    [pagina]
-                )
-
-                blocos.append(
-                    (
-                        [pagina],
-                        conteudo_pagina
-                    )
-                )
-
-                bloco_atual = []
-
-    # Último bloco
-    if bloco_atual:
-
-        conteudo_bloco = gerar_pdf_paginas(
-            reader,
-            bloco_atual
-        )
-
-        blocos.append(
+    progresso = (
+        progresso_inicio
+        +
+        (
             (
-                bloco_atual.copy(),
-                conteudo_bloco
+                indice + 1
+            )
+            /
+            max(
+                total_paginas,
+                1
             )
         )
+        *
+        (
+            progresso_fim
+            -
+            progresso_inicio
+        )
+    )
 
-    return blocos
+    progress_bar.progress(
+        int(
+            min(
+                progresso,
+                100
+            )
+        )
+    )
 
+# ========================================================
+# ÚLTIMO GRUPO
+# ========================================================
 
-def identificar_documentos(reader):
-    """
-    Analisa página por página e tenta identificar
-    onde começa cada documento.
+if grupo_atual:
 
-    A regra principal é:
+    pdf_final = criar_pdf(
+        reader,
+        grupo_atual
+    )
 
-    Uma nova OP encontrada em uma página
-    indica o início de um novo documento.
+    arquivos_pdf.append(
+        pdf_final
+    )
 
-    Retorna:
+return arquivos_pdf
+```
 
-    [
-        {
-            "op": "72699",
-            "paginas": [0,1,2]
-        },
-        ...
-    ]
-    """
+# ============================================================
 
-    documentos = []
+# CRIA ZIPS DE ATÉ 9,5 MB
 
-    documento_atual = None
+#
 
-    for numero_pagina, pagina in enumerate(
-        reader.pages
+# Os PDFs criados acima são agrupados em ZIPs.
+
+# ============================================================
+
+def criar_zips(
+arquivos_pdf,
+prefixo
+):
+
+```
+zips = []
+
+if not arquivos_pdf:
+
+    return zips
+
+zip_buffer = BytesIO()
+
+zip_file = zipfile.ZipFile(
+    zip_buffer,
+    "w",
+    compression=zipfile.ZIP_DEFLATED
+)
+
+tamanho_atual = 0
+
+numero_zip = 1
+
+numero_pdf = 1
+
+for pdf_bytes in arquivos_pdf:
+
+    tamanho_pdf = len(
+        pdf_bytes
+    )
+
+    nome_pdf = (
+        f"{prefixo}_"
+        f"{numero_pdf:04d}.pdf"
+    )
+
+    # ====================================================
+    # Se o PDF sozinho já ultrapassar 9,5 MB
+    # ====================================================
+
+    if tamanho_pdf > LIMITE_BYTES:
+
+        # Fecha ZIP atual se possuir conteúdo
+        if tamanho_atual > 0:
+
+            zip_file.close()
+
+            zips.append({
+                "nome":
+                    f"{prefixo}_"
+                    f"parte_{numero_zip:03d}.zip",
+
+                "dados":
+                    zip_buffer.getvalue()
+            })
+
+            numero_zip += 1
+
+        # ------------------------------------------------
+        # Cria novo ZIP
+        # ------------------------------------------------
+
+        zip_buffer = BytesIO()
+
+        zip_file = zipfile.ZipFile(
+            zip_buffer,
+            "w",
+            compression=zipfile.ZIP_DEFLATED
+        )
+
+        # ------------------------------------------------
+        # Coloca PDF grande sozinho
+        # ------------------------------------------------
+
+        zip_file.writestr(
+            nome_pdf,
+            pdf_bytes
+        )
+
+        zip_file.close()
+
+        zips.append({
+            "nome":
+                f"{prefixo}_"
+                f"parte_{numero_zip:03d}.zip",
+
+            "dados":
+                zip_buffer.getvalue(),
+
+            "observacao":
+                "Este PDF individual ultrapassou 9,5 MB."
+        })
+
+        numero_zip += 1
+
+        # ------------------------------------------------
+        # Novo ZIP
+        # ------------------------------------------------
+
+        zip_buffer = BytesIO()
+
+        zip_file = zipfile.ZipFile(
+            zip_buffer,
+            "w",
+            compression=zipfile.ZIP_DEFLATED
+        )
+
+        tamanho_atual = 0
+
+        numero_pdf += 1
+
+        continue
+
+    # ====================================================
+    # VERIFICA SE CABE NO ZIP ATUAL
+    # ====================================================
+
+    if (
+        tamanho_atual > 0
+        and
+        tamanho_atual
+        +
+        tamanho_pdf
+        >
+        LIMITE_BYTES
     ):
+
+        # ------------------------------------------------
+        # Fecha ZIP atual
+        # ------------------------------------------------
+
+        zip_file.close()
+
+        zips.append({
+            "nome":
+                f"{prefixo}_"
+                f"parte_{numero_zip:03d}.zip",
+
+            "dados":
+                zip_buffer.getvalue()
+        })
+
+        numero_zip += 1
+
+        # ------------------------------------------------
+        # Cria novo ZIP
+        # ------------------------------------------------
+
+        zip_buffer = BytesIO()
+
+        zip_file = zipfile.ZipFile(
+            zip_buffer,
+            "w",
+            compression=zipfile.ZIP_DEFLATED
+        )
+
+        tamanho_atual = 0
+
+    # ====================================================
+    # ADICIONA PDF AO ZIP
+    # ====================================================
+
+    zip_file.writestr(
+        nome_pdf,
+        pdf_bytes
+    )
+
+    tamanho_atual += tamanho_pdf
+
+    numero_pdf += 1
+
+# ========================================================
+# FECHA ÚLTIMO ZIP
+# ========================================================
+
+if tamanho_atual > 0:
+
+    zip_file.close()
+
+    zips.append({
+        "nome":
+            f"{prefixo}_"
+            f"parte_{numero_zip:03d}.zip",
+
+        "dados":
+            zip_buffer.getvalue()
+    })
+
+else:
+
+    try:
+
+        zip_file.close()
+
+    except Exception:
+
+        pass
+
+return zips
+```
+
+# ============================================================
+
+# PROCESSAMENTO PRINCIPAL
+
+# ============================================================
+
+def processar_pdf(
+caminho_pdf,
+progress_bar,
+status
+):
+
+```
+# ========================================================
+# ABRE PDF
+# ========================================================
+
+status.info(
+    "📖 Abrindo PDF..."
+)
+
+reader = PdfReader(
+    caminho_pdf
+)
+
+total_paginas = len(
+    reader.pages
+)
+
+# ========================================================
+# LISTAS
+# ========================================================
+
+paginas_comprovantes = []
+
+paginas_sem_comprovantes = []
+
+contadores = {}
+
+diagnostico = []
+
+# ========================================================
+# ANALISA TODAS AS PÁGINAS
+# ========================================================
+
+for numero_pagina in range(
+    total_paginas
+):
+
+    pagina = reader.pages[
+        numero_pagina
+    ]
+
+    status.info(
+        f"🔍 Analisando página "
+        f"{numero_pagina + 1} "
+        f"de "
+        f"{total_paginas}..."
+    )
+
+    # ----------------------------------------------------
+    # EXTRAÇÃO DO TEXTO
+    # ----------------------------------------------------
+
+    try:
+
+        texto = (
+            pagina.extract_text()
+            or ""
+        )
+
+    except Exception as erro:
+
+        texto = ""
+
+    texto_normalizado = (
+        normalizar_texto(
+            texto
+        )
+    )
+
+    # ----------------------------------------------------
+    # IDENTIFICA
+    # ----------------------------------------------------
+
+    tipo = identificar_comprovante(
+        texto
+    )
+
+    # ====================================================
+    # COMPROVANTE
+    # ====================================================
+
+    if tipo:
+
+        paginas_comprovantes.append(
+            numero_pagina
+        )
+
+        contadores[tipo] = (
+            contadores.get(
+                tipo,
+                0
+            )
+            +
+            1
+        )
+
+    # ====================================================
+    # SEM COMPROVANTE
+    # ====================================================
+
+    else:
+
+        paginas_sem_comprovantes.append(
+            numero_pagina
+        )
+
+    # ====================================================
+    # DIAGNÓSTICO
+    # ====================================================
+
+    diagnostico.append({
+
+        "pagina":
+            numero_pagina + 1,
+
+        "tipo":
+            tipo
+            if tipo
+            else "NAO_COMPROVANTE",
+
+        "tem_pix":
+            bool(
+                re.search(
+                    r"\bPIX\b",
+                    texto_normalizado
+                )
+            ),
+
+        "tem_comprovante":
+            bool(
+                re.search(
+                    r"\bCOMPROVANTE\b",
+                    texto_normalizado
+                )
+            ),
+
+        "texto":
+            texto_normalizado[
+                :1000
+            ]
+    })
+
+    # ----------------------------------------------------
+    # PROGRESSO
+    # ----------------------------------------------------
+
+    progresso = int(
+        (
+            (
+                numero_pagina + 1
+            )
+            /
+            max(
+                total_paginas,
+                1
+            )
+        )
+        *
+        50
+    )
+
+    progress_bar.progress(
+        progresso
+    )
+
+# ========================================================
+# AGRUPA COMPROVANTES
+# ========================================================
+
+status.info(
+    "📄 Agrupando comprovantes..."
+)
+
+pdfs_comprovantes = (
+    agrupar_paginas_em_pdfs(
+        reader,
+        paginas_comprovantes,
+        progress_bar,
+        50,
+        70
+    )
+)
+
+# ========================================================
+# AGRUPA SEM COMPROVANTES
+# ========================================================
+
+status.info(
+    "📄 Agrupando páginas sem comprovantes..."
+)
+
+pdfs_sem_comprovantes = (
+    agrupar_paginas_em_pdfs(
+        reader,
+        paginas_sem_comprovantes,
+        progress_bar,
+        70,
+        85
+    )
+)
+
+# ========================================================
+# ZIP COMPROVANTES
+# ========================================================
+
+status.info(
+    "📦 Criando ZIPs dos comprovantes..."
+)
+
+zips_comprovantes = criar_zips(
+    pdfs_comprovantes,
+    "COMPROVANTES"
+)
+
+progress_bar.progress(
+    92
+)
+
+# ========================================================
+# ZIP SEM COMPROVANTES
+# ========================================================
+
+status.info(
+    "📦 Criando ZIPs sem comprovantes..."
+)
+
+zips_sem_comprovantes = criar_zips(
+    pdfs_sem_comprovantes,
+    "SEM_COMPROVANTES"
+)
+
+progress_bar.progress(
+    100
+)
+
+status.success(
+    "✅ Processamento concluído!"
+)
+
+# ========================================================
+# RESULTADO
+# ========================================================
+
+resultado = {
+
+    "total_paginas":
+        total_paginas,
+
+    "total_comprovantes":
+        len(
+            paginas_comprovantes
+        ),
+
+    "total_sem_comprovantes":
+        len(
+            paginas_sem_comprovantes
+        ),
+
+    "contadores":
+        contadores,
+
+    "diagnostico":
+        diagnostico,
+
+    "zips_comprovantes":
+        zips_comprovantes,
+
+    "zips_sem_comprovantes":
+        zips_sem_comprovantes
+}
+
+# Libera memória
+del pdfs_comprovantes
+del pdfs_sem_comprovantes
+del reader
+
+gc.collect()
+
+return resultado
+```
+
+# ============================================================
+
+# UPLOAD
+
+# ============================================================
+
+arquivo = st.file_uploader(
+"📎 Selecione o arquivo PDF",
+type=["pdf"],
+help="Selecione o PDF mensal."
+)
+
+# ============================================================
+
+# ARQUIVO SELECIONADO
+
+# ============================================================
+
+if arquivo is not None:
+
+```
+tamanho_original = len(
+    arquivo.getbuffer()
+)
+
+st.success(
+    f"✅ Arquivo selecionado: "
+    f"**{arquivo.name}**"
+)
+
+st.write(
+    f"📦 Tamanho do arquivo: "
+    f"**{formatar_tamanho(tamanho_original)}**"
+)
+
+st.caption(
+    f"Os arquivos de saída serão agrupados "
+    f"em aproximadamente {LIMITE_MB} MB."
+)
+
+# ========================================================
+# BOTÃO PROCESSAR
+# ========================================================
+
+if st.button(
+    "🚀 PROCESSAR PDF",
+    type="primary",
+    use_container_width=True
+):
+
+    progress_bar = st.progress(
+        0
+    )
+
+    status = st.empty()
+
+    pasta_trabalho = tempfile.mkdtemp(
+        prefix="separador_"
+    )
+
+    caminho_pdf = os.path.join(
+        pasta_trabalho,
+        "arquivo_original.pdf"
+    )
+
+    try:
+
+        # ------------------------------------------------
+        # SALVA PDF
+        # ------------------------------------------------
+
+        status.info(
+            "💾 Salvando arquivo..."
+        )
+
+        with open(
+            caminho_pdf,
+            "wb"
+        ) as arquivo_saida:
+
+            arquivo_saida.write(
+                arquivo.getbuffer()
+            )
+
+        # ------------------------------------------------
+        # PROCESSA
+        # ------------------------------------------------
+
+        resultado = processar_pdf(
+            caminho_pdf,
+            progress_bar,
+            status
+        )
+
+        # ------------------------------------------------
+        # GUARDA NO SESSION STATE
+        # ------------------------------------------------
+
+        st.session_state[
+            "resultado"
+        ] = resultado
+
+    except Exception as erro:
+
+        status.error(
+            "❌ Erro durante o processamento."
+        )
+
+        st.exception(
+            erro
+        )
+
+    finally:
 
         try:
 
-            texto = pagina.extract_text() or ""
+            shutil.rmtree(
+                pasta_trabalho,
+                ignore_errors=True
+            )
 
         except Exception:
 
-            texto = ""
+            pass
 
-        op = extrair_op_do_texto(
-            texto
-        )
+        gc.collect()
+```
 
-        # ----------------------------------------------------
-        # Encontrou uma nova OP
-        # ----------------------------------------------------
+# ============================================================
 
-        if op:
+# MOSTRA RESULTADO
 
-            # Se já existe documento aberto,
-            # fecha o anterior
-            if documento_atual is not None:
+# ============================================================
 
-                documentos.append(
-                    documento_atual
-                )
+if "resultado" in st.session_state:
 
-            documento_atual = {
-                "op": op,
-                "paginas": [
-                    numero_pagina
-                ]
-            }
-
-        else:
-
-            # Página continua pertencendo ao
-            # documento anterior
-            if documento_atual is not None:
-
-                documento_atual[
-                    "paginas"
-                ].append(
-                    numero_pagina
-                )
-
-            else:
-
-                # Ainda não encontramos uma OP.
-                # Criamos um documento sem OP.
-                documento_atual = {
-                    "op": "",
-                    "paginas": [
-                        numero_pagina
-                    ]
-                }
-
-    # Fecha último documento
-    if documento_atual is not None:
-
-        documentos.append(
-            documento_atual
-        )
-
-    return documentos
-
-
-def buscar_item_por_op(
-    df,
-    numero_op
-):
-    """
-    Procura o Item correspondente à OP.
-    """
-
-    if not numero_op:
-        return None
-
-    correspondencia = df[
-        df["OP_NORMALIZADA"] == numero_op
+```
+resultado = (
+    st.session_state[
+        "resultado"
     ]
-
-    if correspondencia.empty:
-
-        return None
-
-    return correspondencia.iloc[0]
-
-
-# ============================================================
-# TÍTULO
-# ============================================================
-
-st.title("📄 Renomeador de PDFs")
-
-st.write(
-    """
-    O sistema identifica a Ordem de Pagamento, localiza o Item
-    correspondente no Excel e renomeia os documentos.
-
-    Quando o PDF possui vários anexos, o sistema tenta identificar
-    o início de cada documento pela OP encontrada no conteúdo.
-    """
 )
 
 st.divider()
 
-
-# ============================================================
-# EXCEL
-# ============================================================
-
-st.header("1️⃣ Enviar extrato bancário")
-
-arquivo_excel = st.file_uploader(
-    "Selecione o arquivo Excel",
-    type=["xlsx", "xls"]
+st.header(
+    "📊 Resultado"
 )
 
+# ========================================================
+# INDICADORES
+# ========================================================
 
-df = None
+col1, col2, col3 = st.columns(3)
 
+with col1:
 
-if arquivo_excel is not None:
-
-    try:
-
-        df = pd.read_excel(
-            arquivo_excel,
-            dtype=str
-        )
-
-        # Remove espaços dos nomes das colunas
-        df.columns = [
-            str(coluna).strip()
-            for coluna in df.columns
+    st.metric(
+        "📄 Total de páginas",
+        resultado[
+            "total_paginas"
         ]
-
-        coluna_op = "Ordem de Pagamento"
-        coluna_item = "Item"
-
-        # ----------------------------------------------------
-        # Verificar OP
-        # ----------------------------------------------------
-
-        if coluna_op not in df.columns:
-
-            st.error(
-                "❌ A coluna 'Ordem de Pagamento' não foi encontrada."
-            )
-
-            st.write(
-                "Colunas encontradas no Excel:"
-            )
-
-            st.write(
-                list(df.columns)
-            )
-
-            df = None
-
-        # ----------------------------------------------------
-        # Verificar Item
-        # ----------------------------------------------------
-
-        elif coluna_item not in df.columns:
-
-            st.error(
-                "❌ A coluna 'Item' não foi encontrada."
-            )
-
-            st.write(
-                "Colunas encontradas no Excel:"
-            )
-
-            st.write(
-                list(df.columns)
-            )
-
-            df = None
-
-        else:
-
-            # ------------------------------------------------
-            # Normalizar OP
-            # ------------------------------------------------
-
-            df["OP_NORMALIZADA"] = (
-                df[coluna_op]
-                .apply(normalizar_valor)
-            )
-
-            st.success(
-                f"✅ Excel carregado: {arquivo_excel.name}"
-            )
-
-            st.write(
-                f"**{len(df)} registros encontrados.**"
-            )
-
-            st.subheader(
-                "📊 Informações utilizadas"
-            )
-
-            visualizacao = df[
-                [
-                    coluna_op,
-                    coluna_item
-                ]
-            ].copy()
-
-            st.dataframe(
-                visualizacao,
-                use_container_width=True,
-                hide_index=True
-            )
-
-    except Exception as erro:
-
-        st.error(
-            f"❌ Erro ao ler o Excel: {erro}"
-        )
-
-        df = None
-
-
-# ============================================================
-# PDFS
-# ============================================================
-
-if df is not None:
-
-    st.divider()
-
-    st.header("2️⃣ Selecionar PDFs")
-
-    arquivos_pdf = st.file_uploader(
-        """
-        Selecione os PDFs.
-
-        PDFs grandes contendo vários documentos serão analisados
-        página por página para identificar as OPs.
-        """,
-        type=["pdf"],
-        accept_multiple_files=True
     )
 
-    if arquivos_pdf:
+with col2:
 
-        st.success(
-            f"✅ {len(arquivos_pdf)} PDF(s) selecionado(s)"
+    st.metric(
+        "🧾 Comprovantes encontrados",
+        resultado[
+            "total_comprovantes"
+        ]
+    )
+
+with col3:
+
+    st.metric(
+        "📑 Sem comprovantes",
+        resultado[
+            "total_sem_comprovantes"
+        ]
+    )
+
+# ========================================================
+# TIPOS
+# ========================================================
+
+contadores = resultado[
+    "contadores"
+]
+
+if contadores:
+
+    st.subheader(
+        "🔎 Comprovantes encontrados por tipo"
+    )
+
+    quantidade_colunas = min(
+        4,
+        len(contadores)
+    )
+
+    colunas = st.columns(
+        quantidade_colunas
+    )
+
+    for indice, (
+        tipo,
+        quantidade
+    ) in enumerate(
+        sorted(
+            contadores.items()
+        )
+    ):
+
+        with colunas[
+            indice % quantidade_colunas
+        ]:
+
+            st.metric(
+                tipo.replace(
+                    "_",
+                    " "
+                ),
+                quantidade
+            )
+
+# ========================================================
+# COMPROVANTES
+# ========================================================
+
+st.divider()
+
+st.subheader(
+    "📦 COMPROVANTES"
+)
+
+zips_comprovantes = (
+    resultado[
+        "zips_comprovantes"
+    ]
+)
+
+if zips_comprovantes:
+
+    st.success(
+        f"✅ "
+        f"{len(zips_comprovantes)} "
+        f"ZIP(s) de comprovantes."
+    )
+
+    for indice, item in enumerate(
+        zips_comprovantes
+    ):
+
+        tamanho_zip = len(
+            item[
+                "dados"
+            ]
         )
 
-        st.divider()
-
-        st.header(
-            "3️⃣ Processar documentos"
+        st.write(
+            f"📦 **{item['nome']}**"
         )
 
-        if st.button(
-            "🚀 Renomear PDFs",
-            type="primary",
-            use_container_width=True
+        st.caption(
+            f"Tamanho: "
+            f"{formatar_tamanho(tamanho_zip)}"
+        )
+
+        if (
+            "observacao"
+            in item
         ):
 
-            resultados = []
-
-            arquivos_para_zip = []
-
-            progresso = st.progress(
-                0
+            st.warning(
+                item[
+                    "observacao"
+                ]
             )
 
-            total_arquivos = len(
-                arquivos_pdf
+        st.download_button(
+            label=(
+                f"⬇️ Baixar "
+                f"{item['nome']}"
+            ),
+
+            data=item[
+                "dados"
+            ],
+
+            file_name=item[
+                "nome"
+            ],
+
+            mime="application/zip",
+
+            key=(
+                "download_comp_"
+                +
+                str(indice)
+            ),
+
+            use_container_width=True
+        )
+
+else:
+
+    st.warning(
+        "⚠️ Nenhum comprovante foi encontrado."
+    )
+
+# ========================================================
+# SEM COMPROVANTES
+# ========================================================
+
+st.divider()
+
+st.subheader(
+    "📦 SEM COMPROVANTES"
+)
+
+zips_sem = resultado[
+    "zips_sem_comprovantes"
+]
+
+if zips_sem:
+
+    st.info(
+        f"📄 "
+        f"{len(zips_sem)} "
+        f"ZIP(s) sem comprovantes."
+    )
+
+    for indice, item in enumerate(
+        zips_sem
+    ):
+
+        tamanho_zip = len(
+            item[
+                "dados"
+            ]
+        )
+
+        st.write(
+            f"📦 **{item['nome']}**"
+        )
+
+        st.caption(
+            f"Tamanho: "
+            f"{formatar_tamanho(tamanho_zip)}"
+        )
+
+        if (
+            "observacao"
+            in item
+        ):
+
+            st.warning(
+                item[
+                    "observacao"
+                ]
             )
 
-            # =================================================
-            # PROCESSAR CADA PDF
-            # =================================================
+        st.download_button(
+            label=(
+                f"⬇️ Baixar "
+                f"{item['nome']}"
+            ),
 
-            for indice_arquivo, arquivo_pdf in enumerate(
-                arquivos_pdf
-            ):
+            data=item[
+                "dados"
+            ],
 
-                nome_original = arquivo_pdf.name
+            file_name=item[
+                "nome"
+            ],
 
-                try:
+            mime="application/zip",
 
-                    conteudo_original = (
-                        arquivo_pdf.getvalue()
-                    )
+            key=(
+                "download_sem_"
+                +
+                str(indice)
+            ),
 
-                    tamanho_original = (
-                        tamanho_mb(
-                            conteudo_original
-                        )
-                    )
+            use_container_width=True
+        )
 
-                    # -----------------------------------------
-                    # Ler PDF
-                    # -----------------------------------------
+else:
 
-                    reader = PdfReader(
-                        io.BytesIO(
-                            conteudo_original
-                        )
-                    )
+    st.success(
+        "✅ Não existem páginas sem comprovantes."
+    )
 
-                    quantidade_paginas = len(
-                        reader.pages
-                    )
+# ========================================================
+# DIAGNÓSTICO
+# ========================================================
 
-                    # -----------------------------------------
-                    # PDF pequeno
-                    # -----------------------------------------
+st.divider()
 
-                    if (
-                        len(conteudo_original)
-                        <= LIMITE_BYTES
-                    ):
+with st.expander(
+    "🔍 Diagnóstico — texto encontrado em cada página"
+):
 
-                        # Primeiro tenta OP no nome
-                        numero_op = (
-                            extrair_op_do_nome(
-                                nome_original
-                            )
-                        )
+    diagnostico = resultado[
+        "diagnostico"
+    ]
 
-                        # Se não encontrou no nome,
-                        # procura na primeira página
-                        if not numero_op:
+    st.write(
+        f"Total analisado: "
+        f"**{len(diagnostico)} páginas**"
+    )
 
-                            try:
+    for item in diagnostico:
 
-                                texto_primeira_pagina = (
-                                    reader.pages[0]
-                                    .extract_text()
-                                    or ""
-                                )
+        pagina = item[
+            "pagina"
+        ]
 
-                                numero_op = (
-                                    extrair_op_do_texto(
-                                        texto_primeira_pagina
-                                    )
-                                )
+        tipo = item[
+            "tipo"
+        ]
 
-                            except Exception:
+        tem_pix = item[
+            "tem_pix"
+        ]
 
-                                numero_op = ""
+        tem_comprovante = item[
+            "tem_comprovante"
+        ]
 
-                        # -------------------------------------
-                        # Procurar OP no Excel
-                        # -------------------------------------
+        texto = item[
+            "texto"
+        ]
 
-                        linha = buscar_item_por_op(
-                            df,
-                            numero_op
-                        )
+        # ------------------------------------------------
+        # COMPROVANTE
+        # ------------------------------------------------
 
-                        if linha is None:
+        if tipo != "NAO_COMPROVANTE":
 
-                            resultados.append({
-
-                                "Arquivo original":
-                                    nome_original,
-
-                                "Página inicial":
-                                    1,
-
-                                "Página final":
-                                    quantidade_paginas,
-
-                                "OP identificada":
-                                    numero_op,
-
-                                "Item":
-                                    "",
-
-                                "Tamanho MB":
-                                    round(
-                                        tamanho_original,
-                                        2
-                                    ),
-
-                                "Novo nome":
-                                    "",
-
-                                "Status":
-                                    "⚠️ OP não encontrada no Excel"
-                            })
-
-                        else:
-
-                            item = str(
-                                linha["Item"]
-                            ).strip()
-
-                            if (
-                                item == ""
-                                or item.lower()
-                                == "nan"
-                            ):
-
-                                resultados.append({
-
-                                    "Arquivo original":
-                                        nome_original,
-
-                                    "Página inicial":
-                                        1,
-
-                                    "Página final":
-                                        quantidade_paginas,
-
-                                    "OP identificada":
-                                        numero_op,
-
-                                    "Item":
-                                        "",
-
-                                    "Tamanho MB":
-                                        round(
-                                            tamanho_original,
-                                            2
-                                        ),
-
-                                    "Novo nome":
-                                        "",
-
-                                    "Status":
-                                        "⚠️ Item vazio"
-                                })
-
-                            else:
-
-                                novo_nome = (
-                                    criar_nome_arquivo(
-                                        item,
-                                        nome_original
-                                    )
-                                )
-
-                                arquivos_para_zip.append(
-                                    (
-                                        novo_nome,
-                                        conteudo_original
-                                    )
-                                )
-
-                                resultados.append({
-
-                                    "Arquivo original":
-                                        nome_original,
-
-                                    "Página inicial":
-                                        1,
-
-                                    "Página final":
-                                        quantidade_paginas,
-
-                                    "OP identificada":
-                                        numero_op,
-
-                                    "Item":
-                                        item,
-
-                                    "Tamanho MB":
-                                        round(
-                                            tamanho_original,
-                                            2
-                                        ),
-
-                                    "Novo nome":
-                                        novo_nome,
-
-                                    "Status":
-                                        "✅ Encontrado"
-                                })
-
-                    # -----------------------------------------
-                    # PDF grande
-                    # -----------------------------------------
-
-                    else:
-
-                        st.info(
-                            f"📄 Analisando PDF grande: "
-                            f"{nome_original} "
-                            f"({tamanho_original:.2f} MB)"
-                        )
-
-                        documentos = (
-                            identificar_documentos(
-                                reader
-                            )
-                        )
-
-                        # -------------------------------------
-                        # Nenhuma OP identificada
-                        # -------------------------------------
-
-                        if not documentos:
-
-                            resultados.append({
-
-                                "Arquivo original":
-                                    nome_original,
-
-                                "Página inicial":
-                                    "",
-
-                                "Página final":
-                                    "",
-
-                                "OP identificada":
-                                    "",
-
-                                "Item":
-                                    "",
-
-                                "Tamanho MB":
-                                    round(
-                                        tamanho_original,
-                                        2
-                                    ),
-
-                                "Novo nome":
-                                    "",
-
-                                "Status":
-                                    "❌ Nenhum documento identificado"
-                            })
-
-                        else:
-
-                            contador_documento = 0
-
-                            for documento in documentos:
-
-                                contador_documento += 1
-
-                                numero_op = (
-                                    documento["op"]
-                                )
-
-                                paginas = (
-                                    documento["paginas"]
-                                )
-
-                                pagina_inicial = (
-                                    paginas[0] + 1
-                                )
-
-                                pagina_final = (
-                                    paginas[-1] + 1
-                                )
-
-                                # ---------------------------------
-                                # Documento sem OP
-                                # ---------------------------------
-
-                                if not numero_op:
-
-                                    resultados.append({
-
-                                        "Arquivo original":
-                                            nome_original,
-
-                                        "Página inicial":
-                                            pagina_inicial,
-
-                                        "Página final":
-                                            pagina_final,
-
-                                        "OP identificada":
-                                            "",
-
-                                        "Item":
-                                            "",
-
-                                        "Tamanho MB":
-                                            "",
-
-                                        "Novo nome":
-                                            "",
-
-                                        "Status":
-                                            "⚠️ Documento sem OP identificada"
-                                    })
-
-                                    continue
-
-                                # ---------------------------------
-                                # Buscar Item
-                                # ---------------------------------
-
-                                linha = (
-                                    buscar_item_por_op(
-                                        df,
-                                        numero_op
-                                    )
-                                )
-
-                                if linha is None:
-
-                                    resultados.append({
-
-                                        "Arquivo original":
-                                            nome_original,
-
-                                        "Página inicial":
-                                            pagina_inicial,
-
-                                        "Página final":
-                                            pagina_final,
-
-                                        "OP identificada":
-                                            numero_op,
-
-                                        "Item":
-                                            "",
-
-                                        "Tamanho MB":
-                                            "",
-
-                                        "Novo nome":
-                                            "",
-
-                                        "Status":
-                                            "⚠️ OP não encontrada no Excel"
-                                    })
-
-                                    continue
-
-                                item = str(
-                                    linha["Item"]
-                                ).strip()
-
-                                if (
-                                    item == ""
-                                    or item.lower()
-                                    == "nan"
-                                ):
-
-                                    resultados.append({
-
-                                        "Arquivo original":
-                                            nome_original,
-
-                                        "Página inicial":
-                                            pagina_inicial,
-
-                                        "Página final":
-                                            pagina_final,
-
-                                        "OP identificada":
-                                            numero_op,
-
-                                        "Item":
-                                            "",
-
-                                        "Tamanho MB":
-                                            "",
-
-                                        "Novo nome":
-                                            "",
-
-                                        "Status":
-                                            "⚠️ Item vazio"
-                                    })
-
-                                    continue
-
-                                # ---------------------------------
-                                # Gerar documento
-                                # ---------------------------------
-
-                                blocos = (
-                                    dividir_documento_por_tamanho(
-                                        reader,
-                                        paginas
-                                    )
-                                )
-
-                                quantidade_blocos = len(
-                                    blocos
-                                )
-
-                                # ---------------------------------
-                                # Cada bloco
-                                # ---------------------------------
-
-                                for indice_bloco, (
-                                    paginas_bloco,
-                                    conteudo_bloco
-                                ) in enumerate(
-                                    blocos,
-                                    start=1
-                                ):
-
-                                    tamanho_bloco = (
-                                        tamanho_mb(
-                                            conteudo_bloco
-                                        )
-                                    )
-
-                                    pagina_inicio_bloco = (
-                                        paginas_bloco[0]
-                                        + 1
-                                    )
-
-                                    pagina_fim_bloco = (
-                                        paginas_bloco[-1]
-                                        + 1
-                                    )
-
-                                    # -----------------------------
-                                    # Nome
-                                    # -----------------------------
-
-                                    if quantidade_blocos == 1:
-
-                                        novo_nome = (
-                                            f"Item {item} - "
-                                            f"OP {numero_op}.pdf"
-                                        )
-
-                                    else:
-
-                                        novo_nome = (
-                                            f"Item {item} - "
-                                            f"OP {numero_op} - "
-                                            f"Parte {indice_bloco}.pdf"
-                                        )
-
-                                    # -----------------------------
-                                    # Documento acima de 10 MB
-                                    # -----------------------------
-
-                                    if (
-                                        tamanho_bloco
-                                        > LIMITE_MB
-                                    ):
-
-                                        resultados.append({
-
-                                            "Arquivo original":
-                                                nome_original,
-
-                                            "Página inicial":
-                                                pagina_inicio_bloco,
-
-                                            "Página final":
-                                                pagina_fim_bloco,
-
-                                            "OP identificada":
-                                                numero_op,
-
-                                            "Item":
-                                                item,
-
-                                            "Tamanho MB":
-                                                round(
-                                                    tamanho_bloco,
-                                                    2
-                                                ),
-
-                                            "Novo nome":
-                                                novo_nome,
-
-                                            "Status":
-                                                "❌ Página individual excede 10 MB"
-                                        })
-
-                                    else:
-
-                                        arquivos_para_zip.append(
-                                            (
-                                                novo_nome,
-                                                conteudo_bloco
-                                            )
-                                        )
-
-                                        resultados.append({
-
-                                            "Arquivo original":
-                                                nome_original,
-
-                                            "Página inicial":
-                                                pagina_inicio_bloco,
-
-                                            "Página final":
-                                                pagina_fim_bloco,
-
-                                            "OP identificada":
-                                                numero_op,
-
-                                            "Item":
-                                                item,
-
-                                            "Tamanho MB":
-                                                round(
-                                                    tamanho_bloco,
-                                                    2
-                                                ),
-
-                                            "Novo nome":
-                                                novo_nome,
-
-                                            "Status":
-                                                "✅ Encontrado"
-                                        })
-
-                except Exception as erro:
-
-                    resultados.append({
-
-                        "Arquivo original":
-                            nome_original,
-
-                        "Página inicial":
-                            "",
-
-                        "Página final":
-                            "",
-
-                        "OP identificada":
-                            "",
-
-                        "Item":
-                            "",
-
-                        "Tamanho MB":
-                            round(
-                                tamanho_original
-                                if "tamanho_original"
-                                in locals()
-                                else 0,
-                                2
-                            ),
-
-                        "Novo nome":
-                            "",
-
-                        "Status":
-                            f"❌ Erro: {erro}"
-                    })
-
-                # ---------------------------------------------
-                # Atualizar progresso
-                # ---------------------------------------------
-
-                progresso.progress(
-                    (indice_arquivo + 1)
-                    / total_arquivos
-                )
-
-            # =================================================
-            # RESULTADOS
-            # =================================================
-
-            st.divider()
-
-            st.header(
-                "4️⃣ Resultado do processamento"
+            st.success(
+                f"Página {pagina} "
+                f"→ **{tipo}**"
             )
 
-            df_resultados = pd.DataFrame(
-                resultados
+            st.code(
+                texto
             )
 
-            st.dataframe(
-                df_resultados,
-                use_container_width=True,
-                hide_index=True
+        # ------------------------------------------------
+        # PIX NÃO CLASSIFICADO
+        # ------------------------------------------------
+
+        elif tem_pix:
+
+            st.warning(
+                f"Página {pagina} "
+                f"→ contém PIX, "
+                f"mas não foi classificada."
             )
 
-            # =================================================
-            # RESUMO
-            # =================================================
-
-            total = len(
-                resultados
+            st.code(
+                texto
             )
 
-            encontrados = sum(
-                resultado["Status"]
-                == "✅ Encontrado"
-                for resultado in resultados
+        # ------------------------------------------------
+        # COMPROVANTE NÃO CLASSIFICADO
+        # ------------------------------------------------
+
+        elif tem_comprovante:
+
+            st.info(
+                f"Página {pagina} "
+                f"→ contém COMPROVANTE."
             )
 
-            problemas = (
-                total
-                - encontrados
+            st.code(
+                texto
             )
-
-            col1, col2, col3 = st.columns(
-                3
-            )
-
-            with col1:
-
-                st.metric(
-                    "Documentos processados",
-                    total
-                )
-
-            with col2:
-
-                st.metric(
-                    "Encontrados",
-                    encontrados
-                )
-
-            with col3:
-
-                st.metric(
-                    "Com problema",
-                    problemas
-                )
-
-            # =================================================
-            # ZIP
-            # =================================================
-
-            if arquivos_para_zip:
-
-                st.divider()
-
-                st.header(
-                    "5️⃣ Baixar PDFs renomeados"
-                )
-
-                zip_buffer = io.BytesIO()
-
-                with zipfile.ZipFile(
-                    zip_buffer,
-                    "w",
-                    zipfile.ZIP_DEFLATED
-                ) as zip_file:
-
-                    nomes_zip = set()
-
-                    for (
-                        novo_nome,
-                        conteudo
-                    ) in arquivos_para_zip:
-
-                        # -------------------------------------
-                        # Evita arquivos com mesmo nome
-                        # -------------------------------------
-
-                        nome_final = novo_nome
-
-                        contador = 1
-
-                        while nome_final in nomes_zip:
-
-                            nome_sem_extensao = (
-                                novo_nome
-                                .rsplit(
-                                    ".",
-                                    1
-                                )[0]
-                            )
-
-                            nome_final = (
-                                f"{nome_sem_extensao} "
-                                f"({contador}).pdf"
-                            )
-
-                            contador += 1
-
-                        nomes_zip.add(
-                            nome_final
-                        )
-
-                        zip_file.writestr(
-                            nome_final,
-                            conteudo
-                        )
-
-                zip_buffer.seek(0)
-
-                st.download_button(
-                    label="📦 Baixar PDFs renomeados",
-                    data=zip_buffer,
-                    file_name="PDFs_renomeados.zip",
-                    mime="application/zip",
-                    use_container_width=True
-                )
-
-            # =================================================
-            # EXPORTAR RESULTADO
-            # =================================================
-
-            if resultados:
-
-                st.divider()
-
-                st.header(
-                    "6️⃣ Baixar relatório"
-                )
-
-                excel_resultado = io.BytesIO()
-
-                with pd.ExcelWriter(
-                    excel_resultado,
-                    engine="openpyxl"
-                ) as writer:
-
-                    df_resultados.to_excel(
-                        writer,
-                        index=False,
-                        sheet_name="Resultado"
-                    )
-
-                excel_resultado.seek(0)
-
-                st.download_button(
-                    label="📊 Baixar relatório Excel",
-                    data=excel_resultado,
-                    file_name="Resultado_processamento.xlsx",
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    ),
-                    use_container_width=True
-                )
-
-            # =================================================
-            # MENSAGEM FINAL
-            # =================================================
-
-            if encontrados == total:
-
-                st.success(
-                    "🎉 Todos os documentos foram processados "
-                    "com sucesso!"
-                )
-
-            elif encontrados > 0:
-
-                st.warning(
-                    f"⚠️ {encontrados} documento(s) foram "
-                    f"processados e {problemas} precisam "
-                    f"de verificação."
-                )
-
-            else:
-
-                st.error(
-                    "❌ Nenhum documento foi relacionado "
-                    "ao Excel."
-                )
+```
