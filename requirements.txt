@@ -1,2 +1,5 @@
-streamlit==1.40.1
-pypdf==5.1.0
+streamlit
+pandas
+openpyxl
+xlrd
+pypdf
