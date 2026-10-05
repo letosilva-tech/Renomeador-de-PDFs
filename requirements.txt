@@ -1,4 +1,2 @@
-streamlit
-pandas
-openpyxl
-requirements.txt
+streamlit==1.40.1
+pypdf==5.1.0
