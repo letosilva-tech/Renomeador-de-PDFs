@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import os
 import re
@@ -1357,4 +1356,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-```
