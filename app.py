@@ -1466,12 +1466,10 @@ if df is not None:
 
                 st.error(
 
-            
-# ============================================================
-# RODAPÉ
-# ============================================================
 
-st.divider()
+# ============================================================
+# RODAPÉ - DESENVOLVEDOR
+# ============================================================
 
 st.markdown(
     """
@@ -1479,14 +1477,12 @@ st.markdown(
         text-align: center;
         color: #808080;
         font-size: 14px;
-        padding: 10px 0 5px 0;
+        padding: 20px 0;
+        border-top: 1px solid #e0e0e0;
+        margin-top: 30px;
     ">
         Desenvolvido por <strong>Leto Milton</strong> © 2026
     </div>
     """,
     unsafe_allow_html=True
 )
-
-                    "❌ Nenhum documento foi relacionado "
-                    "ao Excel."
-                )
