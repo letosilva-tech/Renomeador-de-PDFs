@@ -18,9 +18,6 @@ st.set_page_config(
     layout="wide"
 )
 
-LIMITE_MB = 10
-LIMITE_BYTES = LIMITE_MB * 1024 * 1024
-
 
 # ============================================================
 # FUNÇÕES
@@ -81,12 +78,12 @@ def criar_nome_arquivo(item, nome_original):
 
 
 def tamanho_mb(conteudo):
-    """Retorna o tamanho em MB."""
+    """Retorna o tamanho em MB apenas para informação no relatório."""
     return len(conteudo) / (1024 * 1024)
 
 
 def gerar_pdf_paginas(reader, paginas):
-    """Cria um PDF contendo somente as páginas indicadas."""
+    """Gera um PDF com todas as páginas do documento identificado."""
     writer = PdfWriter()
 
     for indice in paginas:
@@ -98,79 +95,13 @@ def gerar_pdf_paginas(reader, paginas):
     return buffer.getvalue()
 
 
-def dividir_por_tamanho(
-    reader,
-    paginas,
-    limite_bytes=LIMITE_BYTES
-):
-    """
-    Agrupa o maior número possível de páginas em blocos
-    de até 10 MB. Uma página que ultrapasse o limite
-    será mantida em um bloco individual e sinalizada.
-    """
-    blocos = []
-    bloco_atual = []
-
-    for pagina in paginas:
-        teste = bloco_atual + [pagina]
-
-        conteudo_teste = gerar_pdf_paginas(
-            reader,
-            teste
-        )
-
-        if len(conteudo_teste) <= limite_bytes:
-            bloco_atual.append(pagina)
-            continue
-
-        # Salva o bloco anterior, caso exista
-        if bloco_atual:
-            conteudo_bloco = gerar_pdf_paginas(
-                reader,
-                bloco_atual
-            )
-
-            blocos.append((
-                bloco_atual.copy(),
-                conteudo_bloco
-            ))
-
-            bloco_atual = []
-
-        # Testa a página individual
-        conteudo_pagina = gerar_pdf_paginas(
-            reader,
-            [pagina]
-        )
-
-        if len(conteudo_pagina) > limite_bytes:
-            blocos.append((
-                [pagina],
-                conteudo_pagina
-            ))
-        else:
-            bloco_atual = [pagina]
-
-    # Salva o último bloco
-    if bloco_atual:
-        conteudo_bloco = gerar_pdf_paginas(
-            reader,
-            bloco_atual
-        )
-
-        blocos.append((
-            bloco_atual.copy(),
-            conteudo_bloco
-        ))
-
-    return blocos
-
-
 def identificar_documentos(reader):
     """
-    Identifica documentos dentro de um PDF grande.
+    Identifica documentos dentro de um PDF com vários anexos.
+
     Uma nova OP inicia um novo documento.
     Páginas sem OP são associadas ao documento anterior.
+    Não existe divisão por tamanho.
     """
     documentos = []
     documento_atual = None
@@ -257,9 +188,10 @@ st.write(
     O sistema identifica a Ordem de Pagamento, localiza o Item
     correspondente no Excel e renomeia os documentos.
 
-    PDFs grandes com vários anexos também podem ser processados.
-    O sistema identifica as OPs no conteúdo do PDF e divide
-    os documentos quando necessário para respeitar o limite de 10 MB.
+    PDFs de qualquer tamanho podem ser processados.
+    Não há limite de tamanho configurado nem divisão de documentos
+    por tamanho. PDFs com vários anexos são analisados para
+    identificar as OPs e renomear cada documento completo.
     """
 )
 
@@ -396,203 +328,119 @@ if df is not None:
                     quantidade_paginas = len(reader.pages)
 
                     # ------------------------------------------------
-                    # PDF DE ATÉ 10 MB
+                    # IDENTIFICAR DOCUMENTOS
                     # ------------------------------------------------
 
-                    if len(conteudo_original) <= LIMITE_BYTES:
-                        numero_op = extrair_op_do_nome(
-                            nome_original
-                        )
+                    numero_op_nome = extrair_op_do_nome(
+                        nome_original
+                    )
 
-                        # Se não encontrar no nome, procura na primeira página
-                        if not numero_op and quantidade_paginas > 0:
-                            try:
-                                texto = (
-                                    reader.pages[0].extract_text()
-                                    or ""
-                                )
+                    # Se a OP estiver no início do nome,
+                    # considera o PDF inteiro como um documento.
+                    if numero_op_nome:
+                        documentos = [{
+                            "op": numero_op_nome,
+                            "paginas": list(range(quantidade_paginas))
+                        }]
 
-                                numero_op = extrair_op_do_texto(
-                                    texto
-                                )
+                    else:
+                        # Caso contrário, identifica as OPs no
+                        # conteúdo para reconhecer anexos diferentes.
+                        documentos = identificar_documentos(reader)
 
-                            except Exception:
-                                numero_op = ""
+                    if not documentos:
+                        resultados.append(resultado_linha(
+                            nome_original,
+                            tamanho=round(tamanho_original, 2),
+                            status="❌ Nenhuma OP identificada"
+                        ))
 
-                        if not numero_op:
-                            resultados.append(resultado_linha(
-                                nome_original,
-                                1,
-                                quantidade_paginas,
-                                tamanho=round(tamanho_original, 2),
-                                status="❌ Não foi possível identificar a OP"
-                            ))
+                    else:
+                        for documento in documentos:
+                            numero_op = documento["op"]
+                            paginas = documento["paginas"]
 
-                        else:
+                            if not paginas:
+                                continue
+
+                            pagina_inicial = paginas[0] + 1
+                            pagina_final = paginas[-1] + 1
+
+                            if not numero_op:
+                                resultados.append(resultado_linha(
+                                    nome_original,
+                                    pagina_inicial,
+                                    pagina_final,
+                                    tamanho=round(tamanho_original, 2),
+                                    status="⚠️ Páginas sem OP identificada"
+                                ))
+                                continue
+
                             linha = buscar_item(df, numero_op)
 
                             if linha is None:
                                 resultados.append(resultado_linha(
                                     nome_original,
-                                    1,
-                                    quantidade_paginas,
+                                    pagina_inicial,
+                                    pagina_final,
                                     op=numero_op,
                                     tamanho=round(tamanho_original, 2),
                                     status="⚠️ OP não encontrada no Excel"
                                 ))
+                                continue
 
+                            item = str(linha["Item"]).strip()
+
+                            if item == "" or item.lower() == "nan":
+                                resultados.append(resultado_linha(
+                                    nome_original,
+                                    pagina_inicial,
+                                    pagina_final,
+                                    op=numero_op,
+                                    tamanho=round(tamanho_original, 2),
+                                    status="⚠️ Item vazio"
+                                ))
+                                continue
+
+                            # Se o documento corresponder ao PDF inteiro,
+                            # mantém os bytes originais, sem reconstruí-lo.
+                            if (
+                                len(paginas) == quantidade_paginas
+                                and paginas == list(range(quantidade_paginas))
+                            ):
+                                conteudo_documento = conteudo_original
                             else:
-                                item = str(linha["Item"]).strip()
-
-                                if item == "" or item.lower() == "nan":
-                                    resultados.append(resultado_linha(
-                                        nome_original,
-                                        1,
-                                        quantidade_paginas,
-                                        op=numero_op,
-                                        tamanho=round(tamanho_original, 2),
-                                        status="⚠️ OP encontrada, mas Item está vazio"
-                                    ))
-
-                                else:
-                                    novo_nome = criar_nome_arquivo(
-                                        item,
-                                        nome_original
-                                    )
-
-                                    arquivos_para_zip.append((
-                                        novo_nome,
-                                        conteudo_original
-                                    ))
-
-                                    resultados.append(resultado_linha(
-                                        nome_original,
-                                        1,
-                                        quantidade_paginas,
-                                        op=numero_op,
-                                        item=item,
-                                        tamanho=round(tamanho_original, 2),
-                                        novo_nome=novo_nome,
-                                        status="✅ Encontrado"
-                                    ))
-
-                    # ------------------------------------------------
-                    # PDF COM MAIS DE 10 MB
-                    # ------------------------------------------------
-
-                    else:
-                        st.info(
-                            f"📄 PDF grande identificado: {nome_original} "
-                            f"({tamanho_original:.2f} MB)"
-                        )
-
-                        documentos = identificar_documentos(reader)
-
-                        if not documentos:
-                            resultados.append(resultado_linha(
-                                nome_original,
-                                tamanho=round(tamanho_original, 2),
-                                status="❌ Nenhuma OP identificada"
-                            ))
-
-                        else:
-                            for documento in documentos:
-                                numero_op = documento["op"]
-                                paginas = documento["paginas"]
-
-                                pagina_inicial = paginas[0] + 1
-                                pagina_final = paginas[-1] + 1
-
-                                if not numero_op:
-                                    resultados.append(resultado_linha(
-                                        nome_original,
-                                        pagina_inicial,
-                                        pagina_final,
-                                        status="⚠️ Páginas sem OP identificada"
-                                    ))
-                                    continue
-
-                                linha = buscar_item(df, numero_op)
-
-                                if linha is None:
-                                    resultados.append(resultado_linha(
-                                        nome_original,
-                                        pagina_inicial,
-                                        pagina_final,
-                                        op=numero_op,
-                                        status="⚠️ OP não encontrada no Excel"
-                                    ))
-                                    continue
-
-                                item = str(linha["Item"]).strip()
-
-                                if item == "" or item.lower() == "nan":
-                                    resultados.append(resultado_linha(
-                                        nome_original,
-                                        pagina_inicial,
-                                        pagina_final,
-                                        op=numero_op,
-                                        status="⚠️ Item vazio"
-                                    ))
-                                    continue
-
-                                blocos = dividir_por_tamanho(
+                                # Para PDFs com vários anexos, salva todas
+                                # as páginas identificadas para cada OP.
+                                conteudo_documento = gerar_pdf_paginas(
                                     reader,
                                     paginas
                                 )
 
-                                total_blocos = len(blocos)
+                            tamanho_documento = tamanho_mb(
+                                conteudo_documento
+                            )
 
-                                for numero_bloco, (
-                                    paginas_bloco,
-                                    conteudo_bloco
-                                ) in enumerate(blocos, start=1):
+                            # PDF renomeado sem divisão por tamanho
+                            novo_nome = (
+                                f"Item {item} - OP {numero_op}.pdf"
+                            )
 
-                                    tamanho_bloco = tamanho_mb(
-                                        conteudo_bloco
-                                    )
+                            arquivos_para_zip.append((
+                                novo_nome,
+                                conteudo_documento
+                            ))
 
-                                    pagina_inicio = paginas_bloco[0] + 1
-                                    pagina_fim = paginas_bloco[-1] + 1
-
-                                    if total_blocos == 1:
-                                        novo_nome = (
-                                            f"Item {item} - OP {numero_op}.pdf"
-                                        )
-                                    else:
-                                        novo_nome = (
-                                            f"Item {item} - OP {numero_op} - "
-                                            f"Parte {numero_bloco}.pdf"
-                                        )
-
-                                    if len(conteudo_bloco) > LIMITE_BYTES:
-                                        resultados.append(resultado_linha(
-                                            nome_original,
-                                            pagina_inicio,
-                                            pagina_fim,
-                                            op=numero_op,
-                                            item=item,
-                                            tamanho=round(tamanho_bloco, 2),
-                                            novo_nome=novo_nome,
-                                            status="❌ Uma página/bloco excede 10 MB"
-                                        ))
-
-                                    else:
-                                        arquivos_para_zip.append((
-                                            novo_nome,
-                                            conteudo_bloco
-                                        ))
-
-                                        resultados.append(resultado_linha(
-                                            nome_original,
-                                            pagina_inicio,
-                                            pagina_fim,
-                                            op=numero_op,
-                                            item=item,
-                                            tamanho=round(tamanho_bloco, 2),
-                                            novo_nome=novo_nome,
-                                            status="✅ Encontrado"
-                                        ))
+                            resultados.append(resultado_linha(
+                                nome_original,
+                                pagina_inicial,
+                                pagina_final,
+                                op=numero_op,
+                                item=item,
+                                tamanho=round(tamanho_documento, 2),
+                                novo_nome=novo_nome,
+                                status="✅ Encontrado"
+                            ))
 
                 except Exception as erro:
                     resultados.append(resultado_linha(
@@ -623,7 +471,7 @@ if df is not None:
             total = len(resultados)
 
             encontrados = sum(
-                resultado["Status"] == "✅ Encontrado"
+                resultado["Status"].startswith("✅ Encontrado")
                 for resultado in resultados
             )
 
@@ -743,7 +591,6 @@ if df is not None:
 
 # ============================================================
 # RODAPÉ - DESENVOLVEDOR
-# Fora dos blocos condicionais para aparecer sempre
 # ============================================================
 
 st.markdown(
