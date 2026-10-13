@@ -1465,6 +1465,28 @@ if df is not None:
             else:
 
                 st.error(
+
+            
+# ============================================================
+# RODAPÉ
+# ============================================================
+
+st.divider()
+
+st.markdown(
+    """
+    <div style="
+        text-align: center;
+        color: #808080;
+        font-size: 14px;
+        padding: 10px 0 5px 0;
+    ">
+        Desenvolvido por <strong>Leto Milton</strong> © 2026
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
                     "❌ Nenhum documento foi relacionado "
                     "ao Excel."
                 )
